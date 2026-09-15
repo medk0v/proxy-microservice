@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Прокси</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="loading" class="loading" role="status">Загрузка…</div>
+  <main id="login-view" class="login" hidden>
+    <div class="brand">Прокси</div>
+    <h1>Вход в сервис</h1>
+    <form id="login-form">
+      <label>Логин<input name="username" autocomplete="username" required maxlength="128" autofocus></label>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <button class="primary" type="submit">Войти</button>
+    </form>
+  </main>
+
+  <div id="app-view" hidden>
+    <header class="app-header">
+      <a class="brand" href="/">Прокси</a>
+      <div class="account"><button id="api-button" type="button">API и ключи</button><span id="account-name"></span><button id="logout-button" class="quiet" type="button">Выйти</button></div>
+    </header>
+    <main class="workspace">
+      <div class="page-heading"><h1>Список прокси</h1><button id="import-button" class="primary" type="button">+ Добавить прокси</button></div>
+      <div class="toolbar">
+        <label class="search"><span class="sr-only">Поиск по хосту или логину</span><input id="search" type="search" placeholder="Поиск по хосту или логину"></label>
+        <label><span class="sr-only">Протокол</span><select id="protocol-filter"><option value="">Все протоколы</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></label>
+        <label><span class="sr-only">Регион</span><select id="region-filter"><option value="">Все регионы</option></select></label>
+        <label><span class="sr-only">Страна</span><select id="country-filter"><option value="">Все страны</option></select></label>
+        <button id="export-button" type="button">Скачать / копировать</button>
+      </div>
+      <div class="list-meta"><span id="list-count" role="status"></span><button id="delete-button" class="danger quiet" type="button" hidden>Удалить выбранные</button></div>
+      <div id="list-error" class="error notice" role="alert" hidden></div>
+      <div class="table-scroll">
+        <table id="proxy-table">
+          <thead><tr><th class="selection"><input id="select-all" type="checkbox" aria-label="Выбрать все прокси на странице"></th><th>Хост : порт</th><th>Протокол</th><th>Регион / страна</th><th>Логин</th><th>Пароль</th><th><span class="sr-only">Действия</span></th></tr></thead>
+          <tbody id="proxy-rows"></tbody>
+        </table>
+      </div>
+      <div id="empty-state" class="empty" hidden><h2 id="empty-title">Прокси пока нет</h2><p id="empty-description">Вставьте список или загрузите TXT / CSV.</p><button id="empty-import-button" type="button">Добавить прокси</button></div>
+      <nav class="pagination" aria-label="Страницы списка"><span id="page-info"></span><div><button id="prev-page" type="button">← Назад</button><button id="next-page" type="button">Далее →</button></div></nav>
+    </main>
+  </div>
+
+  <dialog id="import-dialog" class="wide-dialog" aria-labelledby="import-title">
+    <div class="dialog-heading"><h2 id="import-title">Добавить прокси</h2><button type="button" data-close="import-dialog" class="close" aria-label="Закрыть">×</button></div>
+    <form id="import-form">
+      <div class="form-row">
+        <label class="grow">Формат списка<select id="import-format"><option value="auto">Определить автоматически</option><option value="credentials_at">login:password@host:port</option><option value="csv">host,port,login,password</option><option value="http_url">http://login:password@host:port</option><option value="socks5_url">socks5://login:password@host:port</option><option value="credentials_first">login:password:host:port</option><option value="host_first">host:port:login:password</option><option value="host_port">host:port</option><option value="url">URL с HTTP / HTTPS / SOCKS4 / SOCKS5</option></select></label>
+        <label>Без схемы использовать<select id="import-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></label>
+      </div>
+      <div class="form-row"><label class="grow">Регион для всего списка<select id="import-region"></select></label><label class="grow">Страна для всего списка<select id="import-country"></select></label></div>
+      <label>Список прокси<textarea id="import-text" rows="9" spellcheck="false" autocomplete="off" placeholder="login:password@proxy.example:10000&#10;http://login:password@proxy.example:10001&#10;socks5://login:password@proxy.example:1080" required></textarea></label>
+      <div class="upload-row"><label class="file-label">Загрузить TXT / CSV<input id="import-file" type="file" accept=".txt,.csv,text/plain,text/csv"></label><span id="file-name">До 10 000 строк · 2 МБ</span></div>
+      <p class="hint">Один прокси на строку. Пустые строки и комментарии с # пропускаются. Дубли не добавляются.</p>
+      <div id="import-error" class="error notice" role="alert" hidden></div>
+      <section id="import-preview" class="preview" aria-label="Результат проверки" hidden>
+        <p id="preview-summary" class="summary" role="status"></p>
+        <div id="preview-errors" class="import-errors"></div>
+        <label id="skip-invalid-label" class="check-label" hidden><input id="skip-invalid" type="checkbox">Пропустить ошибочные строки</label>
+        <div class="table-scroll"><table><thead><tr><th>Хост : порт</th><th>Протокол</th><th>Логин</th></tr></thead><tbody id="preview-rows"></tbody></table></div>
+        <p class="hint">Первые 10 корректных строк. Пароли скрыты.</p>
+      </section>
+      <div class="dialog-actions"><button type="button" data-close="import-dialog">Отмена</button><button id="preview-button" type="submit">Проверить список</button><button id="confirm-import" class="primary" type="button" disabled>Добавить</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="export-dialog" aria-labelledby="export-title">
+    <div class="dialog-heading"><h2 id="export-title">Скачать или скопировать</h2><button type="button" data-close="export-dialog" class="close" aria-label="Закрыть">×</button></div>
+    <p>Выгрузка содержит пароли и учитывает текущий поиск и фильтр.</p>
+    <label>Формат<select id="export-format"><option value="url">scheme://login:password@host:port</option><option value="credentials_at">login:password@host:port</option><option value="csv">host,port,login,password</option><option value="credentials_first">login:password:host:port</option><option value="host_first">host:port:login:password</option></select></label>
+    <p class="hint">URL сохраняет протокол каждого прокси. Остальные форматы не содержат протокол.</p>
+    <div id="export-error" class="error notice" role="alert" hidden></div>
+    <div class="dialog-actions"><button id="copy-list" type="button">Копировать список</button><button id="download-list" class="primary" type="button">Скачать TXT</button></div>
+  </dialog>
+
+  <dialog id="api-dialog" class="wide-dialog" aria-labelledby="api-title">
+    <div class="dialog-heading"><h2 id="api-title">API и ключи</h2><button type="button" data-close="api-dialog" class="close" aria-label="Закрыть">×</button></div>
+    <p>Ключ даёт доступ к чтению списка и реквизитов прокси. Всего можно создать 20 ключей.</p>
+    <form id="key-form" class="form-row"><label class="grow">Название<input id="key-name" maxlength="100" required placeholder="Например, мой сервис"></label><button class="primary" type="submit">Создать ключ</button></form>
+    <div id="api-error" class="error notice" role="alert" hidden></div>
+    <section id="new-key" class="new-key" hidden><p>Сохраните ключ: после закрытия он больше не будет показан.</p><div class="form-row"><input id="new-key-value" class="mono grow" readonly aria-label="Новый API-ключ"><button id="copy-key" type="button">Копировать</button></div></section>
+    <div id="key-list" class="key-list"></div>
+    <section class="api-docs" aria-label="Документация API">
+      <h3>Запросить случайный прокси</h3>
+      <p>Без фильтров — любой сохранённый прокси. Можно указать регион, страну или оба фильтра сразу.</p>
+      <pre id="api-example"></pre>
+      <h3>Ответ</h3>
+      <pre>{
+  "id": "…",
+  "protocol": "http",
+  "host": "proxy.example",
+  "port": 10000,
+  "username": "login",
+  "password": "password",
+  "url": "http://login:password@proxy.example:10000",
+  "region": "europe",
+  "country": "DE"
+}</pre>
+      <h3>Фильтры</h3>
+      <dl class="api-filters"><dt><code>region</code></dt><dd><code>europe</code>, <code>asia</code>, <code>northern_america</code>, <code>latin_america_and_caribbean</code>, <code>africa</code>, <code>oceania</code>, <code>world_mix</code>, <code>custom</code>, <code>unknown</code></dd><dt><code>country</code></dt><dd>Двухбуквенный код: <code>DE</code>, <code>US</code>, <code>TR</code>, <code>XK</code> или <code>unknown</code>.</dd><dt><code>protocol</code></dt><dd><code>http</code>, <code>https</code>, <code>socks4</code>, <code>socks5</code>.</dd><dt><code>search</code></dt><dd>Часть хоста или логина.</dd></dl>
+      <h3>Методы</h3>
+      <div class="table-scroll"><table class="api-methods"><tbody><tr><td><code>GET /api/proxies/random</code></td><td>Один случайный прокси с паролем.</td></tr><tr><td><code>GET /api/proxies</code></td><td>Список без паролей. <code>page=1</code>, <code>per_page=50</code> (до 200).</td></tr><tr><td><code>GET /api/proxies/{id}</code></td><td>Один прокси с паролем по ID.</td></tr><tr><td><code>GET /api/proxies/export</code></td><td>TXT с паролями. <code>format=url</code> по умолчанию; также <code>credentials_at</code>, <code>csv</code>, <code>credentials_first</code>, <code>host_first</code>.</td></tr></tbody></table></div>
+      <p class="hint">Фильтры работают для списка, случайного прокси и экспорта. Все заданные фильтры должны совпасть. World Mix и Custom — сохранённые метки региона, не синоним «любой».</p>
+      <p class="hint">401 — неверный или отозванный ключ; 403 — действие запрещено; 404 — прокси не найден; 400 — неверные параметры. Пример ошибки: <code>{"error":{"code":"not_found","message":"Proxy not found"}}</code>. Сервис выдаёт сохранённые реквизиты; доступность и фактический IP прокси не проверяются.</p>
+    </section>
+  </dialog>
+
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <div class="dialog-heading"><h2 id="delete-title">Удалить прокси?</h2><button type="button" data-close="delete-dialog" class="close" aria-label="Закрыть">×</button></div>
+    <p id="delete-description"></p><div id="delete-error" class="error notice" role="alert" hidden></div>
+    <div class="dialog-actions"><button type="button" data-close="delete-dialog">Отмена</button><button id="confirm-delete" class="danger-button" type="button">Удалить</button></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

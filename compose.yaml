@@ -1,0 +1,41 @@
+name: proxy-microservice
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: proxy_service
+      POSTGRES_USER: proxy_service
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/setup.py}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55473}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxy_service -d proxy_service"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  app:
+    build: .
+    profiles: ["full"]
+    environment:
+      DATABASE_URL: postgresql://proxy_service:${POSTGRES_PASSWORD}@db:5432/proxy_service
+      BIND_ADDR: 0.0.0.0:8080
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Run python3 scripts/setup.py}
+      PROXY_ENCRYPTION_KEY: ${PROXY_ENCRYPTION_KEY:?Run python3 scripts/setup.py}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+volumes:
+  postgres_data:
