@@ -23,6 +23,7 @@ const messages = {
   invalid_lines: "Исправьте ошибки или включите пропуск ошибочных строк.", no_valid_proxies: "Нет корректных прокси для добавления.",
   incompatible_format: "Этот формат не сохраняет реквизиты без изменений. Выберите URL или CSV.",
   invalid_country: "Выберите страну из списка или Unknown.", invalid_filter: "Некорректный фильтр или номер страницы.",
+  invalid_expires_at: "Укажите корректные дату и время окончания срока действия.",
   invalid_key_name: "Укажите название ключа длиной до 100 байт.", too_many_keys: "Достигнут лимит 20 ключей. Отзовите ненужный ключ.",
   export_too_large: "Выгрузка ограничена 50 000 прокси. Уточните фильтры.",
   not_found: "Запись не найдена.", invalid_origin: "Адрес страницы не совпадает с адресом сервиса в настройках APP_ORIGIN.",
@@ -39,6 +40,21 @@ function notify(message) {
 }
 function endpoint(item) { return `${item.host.includes(":") ? `[${item.host}]` : item.host}:${item.port}`; }
 function cell(text, className = "") { const el = document.createElement("td"); el.textContent = text; el.className = className; return el; }
+function expiryValue(id) {
+  const input = $(id);
+  if (!input.checkValidity()) throw new Error(messages.invalid_expires_at);
+  if (!input.value) return null;
+  const date = new Date(input.value);
+  if (!Number.isFinite(date.getTime())) throw new Error(messages.invalid_expires_at);
+  return date.toISOString();
+}
+function localDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+}
+function expiryLabel(value) { return value ? new Date(value).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "Без ограничения"; }
+for (const element of document.querySelectorAll("[data-local-timezone]")) element.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone;
 function showLogin() {
   ++listVersion; ++previewVersion;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
@@ -120,11 +136,22 @@ async function loadList() {
       checkCell.append(checkbox);
       const location = cell(regions[item.region] || item.region, "location-cell");
       const country = document.createElement("span"); country.textContent = countryName(item.country); location.append(country);
+      const expiry = cell(expiryLabel(item.expires_at), "expiry-cell");
+      if (item.expired) { const status = document.createElement("span"); status.className = "expired-status"; status.textContent = "Просрочен"; expiry.append(status); }
+      const editExpiry = document.createElement("button"); editExpiry.type = "button"; editExpiry.textContent = "Изменить";
+      editExpiry.setAttribute("aria-label", `Изменить срок действия ${endpoint(item)}`);
+      editExpiry.addEventListener("click", () => {
+        $("expiry-form").dataset.id = item.id; $("expiry-endpoint").textContent = endpoint(item);
+        $("expiry-date").value = localDateTime(item.expires_at); setError("expiry-error", null); $("expiry-dialog").showModal();
+      });
+      expiry.append(editExpiry);
       const actions = cell("", "row-action"); const button = document.createElement("button"); button.type = "button"; button.textContent = "Копировать";
+      button.disabled = item.expired;
+      if (item.expired) button.title = "Срок действия прокси истёк";
       button.setAttribute("aria-label", `Копировать ${endpoint(item)}`);
       button.addEventListener("click", () => action(button, "list-error", async () => { const proxy = await api(`/api/proxies/${item.id}`); await copy(proxy.url); }));
       actions.append(button);
-      row.append(checkCell, cell(endpoint(item), "endpoint"), cell(item.protocol.toUpperCase()), location, cell(item.username || "—", "login-cell"), cell(item.username ? "••••••••" : "—"), actions);
+      row.append(checkCell, cell(endpoint(item), "endpoint"), cell(item.protocol.toUpperCase()), location, cell(item.username || "—", "login-cell"), cell(item.username ? "••••••••" : "—"), expiry, actions);
       return row;
     });
     $("proxy-rows").replaceChildren(...rows);
@@ -164,12 +191,12 @@ function invalidatePreview() {
 }
 function importInput() {
   return { text: $("import-text").value, format: $("import-format").value, protocol: $("import-protocol").value,
-    region: $("import-region").value, country: $("import-country").value, skip_invalid: $("skip-invalid").checked };
+    region: $("import-region").value, country: $("import-country").value, expires_at: expiryValue("import-expires-at"), skip_invalid: $("skip-invalid").checked };
 }
 function updateImportButton() { $("confirm-import").disabled = !previewData || previewData.new === 0 || (previewData.invalid > 0 && !$("skip-invalid").checked); }
 function openImport() { setError("import-error", null); $("import-dialog").showModal(); }
 for (const id of ["import-button", "empty-import-button"]) $(id).addEventListener("click", openImport);
-for (const id of ["import-text", "import-format", "import-protocol", "import-region", "import-country"]) $(id).addEventListener("input", invalidatePreview);
+for (const id of ["import-text", "import-format", "import-protocol", "import-region", "import-country", "import-expires-at"]) $(id).addEventListener("input", invalidatePreview);
 $("skip-invalid").addEventListener("change", updateImportButton);
 $("import-file").addEventListener("change", async (event) => {
   invalidatePreview(); setError("import-error", null);
@@ -195,9 +222,8 @@ $("import-form").addEventListener("submit", (event) => {
 });
 $("confirm-import").addEventListener("click", async () => {
   if (!previewData || $("confirm-import").disabled) return;
-  const input = importInput();
   await action($("confirm-import"), "import-error", async () => {
-    const data = await api("/api/proxies/import", { method: "POST", data: input });
+    const data = await api("/api/proxies/import", { method: "POST", data: importInput() });
     $("import-dialog").close(); page = 1; await loadList();
     notify(`Добавлено: ${data.inserted}. Дублей: ${data.duplicates}. Ошибок пропущено: ${data.invalid}.`);
   });
@@ -206,6 +232,15 @@ $("confirm-import").addEventListener("click", async () => {
 $("import-dialog").addEventListener("close", () => {
   $("import-form").reset(); $("file-name").textContent = "До 10 000 строк · 2 МБ";
   $("preview-rows").replaceChildren(); $("preview-errors").replaceChildren(); invalidatePreview();
+});
+
+$("clear-expiry").addEventListener("click", () => { $("expiry-date").value = ""; $("expiry-date").focus(); });
+$("expiry-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  action($("save-expiry"), "expiry-error", async () => {
+    await api(`/api/proxies/${$("expiry-form").dataset.id}`, { method: "PATCH", data: { expires_at: expiryValue("expiry-date") } });
+    $("expiry-dialog").close(); await loadList(); notify("Срок действия обновлён");
+  });
 });
 
 $("export-button").addEventListener("click", () => { setError("export-error", null); $("export-dialog").showModal(); });

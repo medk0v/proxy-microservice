@@ -16,7 +16,7 @@ public_key=$(cat -- "$1")
     exit 1
 }
 ssh-keygen -l -f "$1" > /dev/null
-for command in python3 psql runuser systemctl visudo flock ss; do
+for command in python3 psql runuser systemctl visudo flock ss curl; do
     command -v "$command" > /dev/null
 done
 exec 9>/run/lock/proxy-microservice-bootstrap.lock

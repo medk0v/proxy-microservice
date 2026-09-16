@@ -1,0 +1,1 @@
+ALTER TABLE proxies ADD COLUMN expires_at TIMESTAMPTZ;

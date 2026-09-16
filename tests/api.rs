@@ -24,6 +24,7 @@ async fn setup(pool: &PgPool) -> (Router, Uuid, String) {
         origin: "http://localhost:8080".into(),
         secure_cookies: false,
         encryption_key: [3; 32],
+        telegram: None,
     };
     (
         application(pool.clone(), &config).await.unwrap(),
@@ -474,4 +475,348 @@ fn private_import_fixture() {
     assert!(parsed.errors.is_empty());
     assert_eq!(parsed.proxies.len(), 1000);
     assert_eq!(parsed.duplicates, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a local PostgreSQL DATABASE_URL"]
+async fn expired_proxies_are_visible_to_owner_but_never_issued(pool: PgPool) {
+    let (app, _, cookie) = setup(&pool).await;
+    for input in [
+        json!({"text": "u:expired-secret@expired.example:8000", "country": "DE", "expires_at": "2000-01-01T00:00:00Z"}),
+        json!({"text": "future.example:8000", "country": "US", "expires_at": "2099-01-01T00:00:00Z"}),
+        json!({"text": "unlimited.example:8000", "country": "AU"}),
+        json!({"text": "null.example:8000", "country": "JP", "expires_at": null}),
+    ] {
+        let (status, result) =
+            request(&app, "POST", "/api/proxies/import", &cookie, Some(input)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["inserted"], 1);
+    }
+    let (_, key) = request(
+        &app,
+        "POST",
+        "/api/keys",
+        &cookie,
+        Some(json!({"name": "expiry"})),
+    )
+    .await;
+    let token = key["token"].as_str().unwrap();
+    let (_, list) = request(&app, "GET", "/api/proxies", &cookie, None).await;
+    assert_eq!(list["total"], 4);
+    let items = list["items"].as_array().unwrap();
+    for item in items {
+        assert!(item.get("expires_at").is_some());
+        assert!(item.get("password").is_none());
+        assert_eq!(item["expired"], item["host"] == "expired.example");
+        if matches!(
+            item["host"].as_str(),
+            Some("unlimited.example" | "null.example")
+        ) {
+            assert!(item["expires_at"].is_null());
+        }
+    }
+    let (_, api_list) = request(&app, "GET", "/api/proxies", token, None).await;
+    assert_eq!(api_list["total"], 3);
+    assert!(
+        api_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["expired"] == false)
+    );
+    for credential in [&cookie[..], token] {
+        for (country, status) in [
+            ("DE", StatusCode::NOT_FOUND),
+            ("US", StatusCode::OK),
+            ("AU", StatusCode::OK),
+            ("JP", StatusCode::OK),
+        ] {
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    &format!("/api/proxies/random?country={country}"),
+                    credential,
+                    None
+                )
+                .await
+                .0,
+                status
+            );
+        }
+        for item in items {
+            let expected = if item["expired"] == true {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    &format!("/api/proxies/{}", item["id"].as_str().unwrap()),
+                    credential,
+                    None
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let (status, export) = request(&app, "GET", "/api/proxies/export", credential, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = export.as_str().unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(!text.contains("expired.example"));
+        assert!(!text.contains("expired-secret"));
+    }
+
+    // A timestamp equal to database time is already expired, including previously unlimited rows.
+    sqlx::query("UPDATE proxies SET expires_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, owner_list) = request(&app, "GET", "/api/proxies", &cookie, None).await;
+    assert_eq!(owner_list["total"], 4);
+    assert!(
+        owner_list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["expired"] == true)
+    );
+    assert_eq!(
+        request(&app, "GET", "/api/proxies", token, None).await.1["total"],
+        0
+    );
+    for credential in [&cookie[..], token] {
+        assert_eq!(
+            request(&app, "GET", "/api/proxies/random", credential, None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, export) = request(&app, "GET", "/api/proxies/export", credential, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(export, "");
+        for item in items {
+            assert_eq!(
+                request(
+                    &app,
+                    "GET",
+                    &format!("/api/proxies/{}", item["id"].as_str().unwrap()),
+                    credential,
+                    None
+                )
+                .await
+                .0,
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a local PostgreSQL DATABASE_URL"]
+async fn import_expiry_validation_timezone_and_duplicate_preservation(pool: PgPool) {
+    let (app, _, cookie) = setup(&pool).await;
+    for invalid in [
+        json!(""),
+        json!("2099-02-30T12:00:00Z"),
+        json!("2099-01-01T25:00:00Z"),
+        json!("2099-01-01"),
+        json!("2099-01-01T12:00:00"),
+        json!(123),
+        json!(true),
+    ] {
+        for endpoint in ["preview", "import"] {
+            let (status, body) = request(
+                &app,
+                "POST",
+                &format!("/api/proxies/{endpoint}"),
+                &cookie,
+                Some(json!({"text": "timezone.example:8000", "expires_at": invalid})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_expires_at");
+        }
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM proxies")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let input = json!({"text": "timezone.example:8000", "expires_at": "2099-01-01T12:00:00+03:00"});
+    let (status, preview) = request(
+        &app,
+        "POST",
+        "/api/proxies/preview",
+        &cookie,
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_utc_expiry(&preview["expires_at"]);
+    let (status, imported) =
+        request(&app, "POST", "/api/proxies/import", &cookie, Some(input)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imported["inserted"], 1);
+    let (_, list) = request(&app, "GET", "/api/proxies", &cookie, None).await;
+    assert_utc_expiry(&list["items"][0]["expires_at"]);
+    let (status, duplicate) = request(
+        &app,
+        "POST",
+        "/api/proxies/import",
+        &cookie,
+        Some(json!({"text": "timezone.example:8000", "expires_at": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(duplicate["inserted"], 0);
+    assert_eq!(duplicate["duplicates"], 1);
+    let preserved: bool = sqlx::query_scalar("SELECT expires_at = '2099-01-01T09:00:00Z'::timestamptz FROM proxies WHERE host = 'timezone.example'")
+        .fetch_one(&pool).await.unwrap();
+    assert!(preserved);
+}
+
+fn assert_utc_expiry(value: &Value) {
+    let value = value.as_str().unwrap();
+    assert!(value.starts_with("2099-01-01T09:00:00"), "{value}");
+    assert!(value.ends_with('Z') || value.ends_with("+00:00"), "{value}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a local PostgreSQL DATABASE_URL"]
+async fn expiry_updates_require_owner_session_and_can_restore_availability(pool: PgPool) {
+    let (app, owner_id, cookie) = setup(&pool).await;
+    assert_eq!(request(&app, "POST", "/api/proxies/import", &cookie,
+        Some(json!({"text": "owner:private-secret@owned.example:8000", "expires_at": "2000-01-01T00:00:00Z"}))).await.0, StatusCode::OK);
+    let (_, list) = request(&app, "GET", "/api/proxies", &cookie, None).await;
+    let id = list["items"][0]["id"].as_str().unwrap();
+    let path = format!("/api/proxies/{id}");
+    let original: Vec<u8> =
+        sqlx::query_scalar("SELECT password_encrypted FROM proxies WHERE user_id = $1")
+            .bind(owner_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (_, key) = request(
+        &app,
+        "POST",
+        "/api/keys",
+        &cookie,
+        Some(json!({"name": "read-only"})),
+    )
+    .await;
+    for (credential, expected) in [
+        ("", StatusCode::UNAUTHORIZED),
+        (key["token"].as_str().unwrap(), StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "PATCH",
+                &path,
+                credential,
+                Some(json!({"expires_at": null}))
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    let other_id = Uuid::new_v4();
+    let other_token = "c".repeat(43);
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash) VALUES ($1, 'other-owner', 'unused')",
+    )
+    .bind(other_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')")
+        .bind(Sha256::digest(other_token.as_bytes()).to_vec()).bind(other_id).execute(&pool).await.unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "PATCH",
+            &path,
+            &format!("proxy_session={other_token}"),
+            Some(json!({"expires_at": null}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&app, "PATCH", &path, &cookie, Some(json!({})))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for invalid in [
+        json!("not-a-date"),
+        json!("2099-01-01T12:00:00"),
+        json!(false),
+    ] {
+        let (status, body) = request(
+            &app,
+            "PATCH",
+            &path,
+            &cookie,
+            Some(json!({"expires_at": invalid})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_expires_at");
+    }
+    assert_eq!(
+        request(&app, "GET", &path, &cookie, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let unchanged: bool = sqlx::query_scalar(
+        "SELECT expires_at = '2000-01-01T00:00:00Z'::timestamptz FROM proxies WHERE user_id = $1",
+    )
+    .bind(owner_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(unchanged);
+    let (status, restored) = request(
+        &app,
+        "PATCH",
+        &path,
+        &cookie,
+        Some(json!({"expires_at": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(restored["expires_at"].is_null());
+    assert_eq!(restored["expired"], false);
+    assert!(restored.get("password").is_none());
+    assert!(!restored.to_string().contains("private-secret"));
+    assert_eq!(
+        request(&app, "GET", &path, &cookie, None).await.0,
+        StatusCode::OK
+    );
+    let (status, updated) = request(
+        &app,
+        "PATCH",
+        &path,
+        &cookie,
+        Some(json!({"expires_at": "2099-01-01T12:00:00+03:00"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_utc_expiry(&updated["expires_at"]);
+    assert_eq!(updated["expired"], false);
+    assert!(updated.get("password").is_none());
+    let current: Vec<u8> =
+        sqlx::query_scalar("SELECT password_encrypted FROM proxies WHERE user_id = $1")
+            .bind(owner_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(current, original);
 }

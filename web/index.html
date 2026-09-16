@@ -38,7 +38,7 @@
       <div id="list-error" class="error notice" role="alert" hidden></div>
       <div class="table-scroll">
         <table id="proxy-table">
-          <thead><tr><th class="selection"><input id="select-all" type="checkbox" aria-label="Выбрать все прокси на странице"></th><th>Хост : порт</th><th>Протокол</th><th>Регион / страна</th><th>Логин</th><th>Пароль</th><th><span class="sr-only">Действия</span></th></tr></thead>
+          <thead><tr><th class="selection"><input id="select-all" type="checkbox" aria-label="Выбрать все прокси на странице"></th><th>Хост : порт</th><th>Протокол</th><th>Регион / страна</th><th>Логин</th><th>Пароль</th><th>Действительно до</th><th><span class="sr-only">Действия</span></th></tr></thead>
           <tbody id="proxy-rows"></tbody>
         </table>
       </div>
@@ -55,6 +55,8 @@
         <label>Без схемы использовать<select id="import-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></label>
       </div>
       <div class="form-row"><label class="grow">Регион для всего списка<select id="import-region"></select></label><label class="grow">Страна для всего списка<select id="import-country"></select></label></div>
+      <label>Действительно до<input id="import-expires-at" type="datetime-local" step="1" aria-describedby="import-expiry-hint"></label>
+      <p id="import-expiry-hint" class="hint expiry-hint">Для всего списка. Время: <span data-local-timezone></span>. Оставьте пустым, если срок не ограничен.</p>
       <label>Список прокси<textarea id="import-text" rows="9" spellcheck="false" autocomplete="off" placeholder="login:password@proxy.example:10000&#10;http://login:password@proxy.example:10001&#10;socks5://login:password@proxy.example:1080" required></textarea></label>
       <div class="upload-row"><label class="file-label">Загрузить TXT / CSV<input id="import-file" type="file" accept=".txt,.csv,text/plain,text/csv"></label><span id="file-name">До 10 000 строк · 2 МБ</span></div>
       <p class="hint">Один прокси на строку. Пустые строки и комментарии с # пропускаются. Дубли не добавляются.</p>
@@ -70,9 +72,21 @@
     </form>
   </dialog>
 
+  <dialog id="expiry-dialog" aria-labelledby="expiry-title">
+    <div class="dialog-heading"><h2 id="expiry-title">Срок действия прокси</h2><button type="button" data-close="expiry-dialog" class="close" aria-label="Закрыть">×</button></div>
+    <p id="expiry-endpoint" class="mono"></p>
+    <form id="expiry-form">
+      <label>Действительно до<input id="expiry-date" type="datetime-local" step="1" aria-describedby="expiry-hint"></label>
+      <p id="expiry-hint" class="hint expiry-hint">Время: <span data-local-timezone></span>. Пустое поле — без ограничения. После указанного времени прокси не выдаётся.</p>
+      <button id="clear-expiry" type="button">Убрать срок</button>
+      <div id="expiry-error" class="error notice" role="alert" hidden></div>
+      <div class="dialog-actions"><button type="button" data-close="expiry-dialog">Отмена</button><button id="save-expiry" class="primary" type="submit">Сохранить</button></div>
+    </form>
+  </dialog>
+
   <dialog id="export-dialog" aria-labelledby="export-title">
     <div class="dialog-heading"><h2 id="export-title">Скачать или скопировать</h2><button type="button" data-close="export-dialog" class="close" aria-label="Закрыть">×</button></div>
-    <p>Выгрузка содержит пароли и учитывает текущий поиск и фильтр.</p>
+    <p>Выгрузка содержит пароли и учитывает текущий поиск и фильтр. Просроченные прокси не включаются.</p>
     <label>Формат<select id="export-format"><option value="url">scheme://login:password@host:port</option><option value="credentials_at">login:password@host:port</option><option value="csv">host,port,login,password</option><option value="credentials_first">login:password:host:port</option><option value="host_first">host:port:login:password</option></select></label>
     <p class="hint">URL сохраняет протокол каждого прокси. Остальные форматы не содержат протокол.</p>
     <div id="export-error" class="error notice" role="alert" hidden></div>
@@ -88,7 +102,7 @@
     <div id="key-list" class="key-list"></div>
     <section class="api-docs" aria-label="Документация API">
       <h3>Запросить случайный прокси</h3>
-      <p>Без фильтров — любой сохранённый прокси. Можно указать регион, страну или оба фильтра сразу.</p>
+      <p>Без фильтров — любой действующий прокси. Можно указать регион, страну или оба фильтра сразу. Просроченные прокси не выдаются.</p>
       <pre id="api-example"></pre>
       <h3>Ответ</h3>
       <pre>{
@@ -100,12 +114,14 @@
   "password": "password",
   "url": "http://login:password@proxy.example:10000",
   "region": "europe",
-  "country": "DE"
+  "country": "DE",
+  "expires_at": null
 }</pre>
       <h3>Фильтры</h3>
       <dl class="api-filters"><dt><code>region</code></dt><dd><code>europe</code>, <code>asia</code>, <code>northern_america</code>, <code>latin_america_and_caribbean</code>, <code>africa</code>, <code>oceania</code>, <code>world_mix</code>, <code>custom</code>, <code>unknown</code></dd><dt><code>country</code></dt><dd>Двухбуквенный код: <code>DE</code>, <code>US</code>, <code>TR</code>, <code>XK</code> или <code>unknown</code>.</dd><dt><code>protocol</code></dt><dd><code>http</code>, <code>https</code>, <code>socks4</code>, <code>socks5</code>.</dd><dt><code>search</code></dt><dd>Часть хоста или логина.</dd></dl>
       <h3>Методы</h3>
-      <div class="table-scroll"><table class="api-methods"><tbody><tr><td><code>GET /api/proxies/random</code></td><td>Один случайный прокси с паролем.</td></tr><tr><td><code>GET /api/proxies</code></td><td>Список без паролей. <code>page=1</code>, <code>per_page=50</code> (до 200).</td></tr><tr><td><code>GET /api/proxies/{id}</code></td><td>Один прокси с паролем по ID.</td></tr><tr><td><code>GET /api/proxies/export</code></td><td>TXT с паролями. <code>format=url</code> по умолчанию; также <code>credentials_at</code>, <code>csv</code>, <code>credentials_first</code>, <code>host_first</code>.</td></tr></tbody></table></div>
+      <div class="table-scroll"><table class="api-methods"><tbody><tr><td><code>GET /api/proxies/random</code></td><td>Один случайный действующий прокси с паролем.</td></tr><tr><td><code>GET /api/proxies</code></td><td>Список без паролей. По API-ключу — только действующие; в панели — все записи. <code>page=1</code>, <code>per_page=50</code> (до 200).</td></tr><tr><td><code>GET /api/proxies/{id}</code></td><td>Один действующий прокси с паролем по ID.</td></tr><tr><td><code>GET /api/proxies/export</code></td><td>TXT с паролями, без просроченных прокси. <code>format=url</code> по умолчанию; также <code>credentials_at</code>, <code>csv</code>, <code>credentials_first</code>, <code>host_first</code>.</td></tr><tr><td><code>PATCH /api/proxies/{id}</code></td><td>Изменить срок действия: <code>{"expires_at":"2027-01-01T00:00:00Z"}</code> или <code>{"expires_at":null}</code>. Только сессия администратора. Возвращает запись без пароля, в том числе просроченную.</td></tr></tbody></table></div>
+      <p class="hint"><code>expires_at</code> — дата и время в RFC 3339 с часовым поясом, <code>null</code> — без ограничения. В списке <code>expired</code> показывает, истёк ли срок. При импорте и проверке списка поле <code>expires_at</code> применяется ко всем новым прокси. В интерфейсе даты показаны в часовом поясе браузера.</p>
       <p class="hint">Фильтры работают для списка, случайного прокси и экспорта. Все заданные фильтры должны совпасть. World Mix и Custom — сохранённые метки региона, не синоним «любой».</p>
       <p class="hint">401 — неверный или отозванный ключ; 403 — действие запрещено; 404 — прокси не найден; 400 — неверные параметры. Пример ошибки: <code>{"error":{"code":"not_found","message":"Proxy not found"}}</code>. Сервис выдаёт сохранённые реквизиты; доступность и фактический IP прокси не проверяются.</p>
     </section>

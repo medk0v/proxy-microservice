@@ -52,7 +52,11 @@ td.login-cell { min-width: 100px; }
 tbody tr:hover { background: #fcfdf9; }
 th.selection, td.selection { width: 42px; padding-left: 10px; padding-right: 6px; }
 td.row-action { text-align: right; }
-td.row-action button { min-height: 32px; padding: 4px 10px; font-size: 13px; }
+td.row-action button, td.expiry-cell button { min-height: 32px; padding: 4px 10px; font-size: 13px; }
+td.expiry-cell { min-width: 160px; }
+td.expiry-cell button { display: block; margin-top: 6px; }
+.expired-status { display: block; color: #ac3325; font-size: 13px; }
+.expiry-hint { margin-top: 8px; }
 .empty { padding: 64px 20px; text-align: center; border-bottom: 1px solid #e6e8e1; }
 .empty h2 { font-size: 20px; margin-bottom: 8px; }
 .empty p { color: #72786b; }

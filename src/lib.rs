@@ -3,6 +3,7 @@ pub mod config;
 mod crypto;
 mod error;
 mod location;
+mod notifications;
 pub mod parser;
 mod proxies;
 
@@ -33,6 +34,7 @@ pub(crate) struct AppState {
     dummy_password_hash: Arc<String>,
     login_limiter: Arc<auth::LoginLimiter>,
     password_slots: Arc<Semaphore>,
+    notifications: notifications::TelegramNotifier,
 }
 
 pub async fn connect(config: &Config) -> anyhow::Result<PgPool> {
@@ -70,6 +72,7 @@ pub async fn application(pool: PgPool, config: &Config) -> anyhow::Result<Router
         dummy_password_hash: Arc::new(dummy_password_hash),
         login_limiter: Arc::default(),
         password_slots: Arc::new(Semaphore::new(4)),
+        notifications: notifications::TelegramNotifier::new(config.telegram.as_ref()),
     }))
 }
 
@@ -83,7 +86,10 @@ fn router(state: AppState) -> Router {
         .route("/api/proxies/preview", post(proxies::preview))
         .route("/api/proxies/import", post(proxies::import))
         .route("/api/proxies/delete", post(proxies::delete_selected))
-        .route("/api/proxies/{id}", get(proxies::detail))
+        .route(
+            "/api/proxies/{id}",
+            get(proxies::detail).patch(proxies::update_expiry),
+        )
         .route("/api/keys", get(auth::list_keys).post(auth::create_key))
         .route(
             "/api/countries",

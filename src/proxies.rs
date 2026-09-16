@@ -5,6 +5,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
@@ -37,6 +38,25 @@ pub(crate) struct ImportInput {
     region: Region,
     #[serde(default = "unknown_country")]
     country: String,
+    #[serde(default)]
+    expires_at: Value,
+}
+
+fn parse_expiry(value: &Value) -> Result<Option<DateTime<Utc>>, ApiError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => DateTime::parse_from_rfc3339(value)
+            .map(|date| Some(date.with_timezone(&Utc)))
+            .map_err(|_| invalid_expiry()),
+        _ => Err(invalid_expiry()),
+    }
+}
+
+fn invalid_expiry() -> ApiError {
+    ApiError::bad_request(
+        "invalid_expires_at",
+        "expires_at must be an RFC 3339 timestamp with a timezone, or null",
+    )
 }
 
 #[derive(Serialize)]
@@ -85,6 +105,7 @@ pub(crate) async fn preview(
     Json(input): Json<ImportInput>,
 ) -> Result<Json<Value>, ApiError> {
     let country = normalize_country(&input.country)?;
+    let expires_at = parse_expiry(&input.expires_at)?;
     let parsed = parser::parse_import(&input.text, input.format, input.protocol)?;
     let existing = existing_count(&state, identity.user_id, &parsed).await? as usize;
     Ok(Json(json!({
@@ -95,6 +116,7 @@ pub(crate) async fn preview(
         "invalid": parsed.errors.len(),
         "region": input.region,
         "country": country,
+        "expires_at": expires_at,
         "errors": parsed.errors,
         "preview": parsed.proxies.iter().take(10).map(PreviewRow::from).collect::<Vec<_>>()
     })))
@@ -106,6 +128,7 @@ pub(crate) async fn import(
     Json(input): Json<ImportInput>,
 ) -> Result<Response, ApiError> {
     let country = normalize_country(&input.country)?;
+    let expires_at = parse_expiry(&input.expires_at)?;
     let parsed = parser::parse_import(&input.text, input.format, input.protocol)?;
     if !parsed.errors.is_empty() && !input.skip_invalid {
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": {"code": "invalid_lines", "message": "Fix invalid lines or explicitly enable skip_invalid"}, "errors": parsed.errors}))).into_response());
@@ -130,7 +153,7 @@ pub(crate) async fn import(
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
         let mut query = QueryBuilder::<Postgres>::new(
-            "INSERT INTO proxies (id, user_id, protocol, host, port, username, region, country, password_encrypted, fingerprint) ",
+            "INSERT INTO proxies (id, user_id, protocol, host, port, username, region, country, password_encrypted, fingerprint, expires_at) ",
         );
         query.push_values(rows, |mut row, (proxy, encrypted, fingerprint)| {
             row.push_bind(Uuid::new_v4())
@@ -142,7 +165,8 @@ pub(crate) async fn import(
                 .push_bind(input.region.as_str())
                 .push_bind(&country)
                 .push_bind(encrypted)
-                .push_bind(fingerprint);
+                .push_bind(fingerprint)
+                .push_bind(expires_at);
         });
         query.push(" ON CONFLICT (user_id, fingerprint) DO NOTHING");
         inserted += query.build().execute(&mut *tx).await?.rows_affected() as usize;
@@ -191,6 +215,8 @@ struct ProxySummary {
     region: String,
     country: String,
     created_at: String,
+    expires_at: Option<DateTime<Utc>>,
+    expired: bool,
 }
 
 pub(crate) async fn list(
@@ -206,10 +232,19 @@ pub(crate) async fn list(
         .map(normalize_country)
         .transpose()?;
     let region = query.region.map(Region::as_str);
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5)")
-        .bind(identity.user_id).bind(protocol).bind(query.search.trim()).bind(region).bind(&country).fetch_one(&state.pool).await?;
-    let items = sqlx::query_as::<_, ProxySummary>("SELECT id, protocol, host, port, username, region, country, created_at::text FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) ORDER BY created_at DESC, id DESC LIMIT $6 OFFSET $7")
-        .bind(identity.user_id).bind(protocol).bind(query.search.trim()).bind(region).bind(&country).bind(per_page).bind((page - 1) * per_page).fetch_all(&state.pool).await?;
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) AND (NOT $6::boolean OR expires_at IS NULL OR expires_at > statement_timestamp())")
+        .bind(identity.user_id).bind(protocol).bind(query.search.trim()).bind(region).bind(&country).bind(identity.api_key).fetch_one(&state.pool).await?;
+    let items = sqlx::query_as::<_, ProxySummary>("SELECT id, protocol, host, port, username, region, country, created_at::text, expires_at, COALESCE(expires_at <= statement_timestamp(), false) AS expired FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) AND (NOT $6::boolean OR expires_at IS NULL OR expires_at > statement_timestamp()) ORDER BY created_at DESC, id DESC LIMIT $7 OFFSET $8")
+        .bind(identity.user_id).bind(protocol).bind(query.search.trim()).bind(region).bind(&country).bind(identity.api_key).bind(per_page).bind((page - 1) * per_page).fetch_all(&state.pool).await?;
+    if identity.api_key && total == 0 {
+        state.notifications.no_proxies(
+            identity.user_id,
+            "list",
+            protocol,
+            region,
+            country.as_deref(),
+        );
+    }
     Ok(Json(
         json!({"items": items, "total": total, "page": page, "per_page": per_page}),
     ))
@@ -225,6 +260,7 @@ struct StoredProxy {
     region: String,
     country: String,
     password_encrypted: Vec<u8>,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 impl StoredProxy {
@@ -242,7 +278,7 @@ impl StoredProxy {
         let p = self.decrypt(state)?;
         Ok(Json(
             json!({"id": self.id, "protocol": p.protocol, "host": p.host, "port": p.port,
-            "username": p.username, "password": p.password, "region": self.region, "country": self.country, "url": p.export(Format::Url)?}),
+            "username": p.username, "password": p.password, "region": self.region, "country": self.country, "expires_at": self.expires_at, "url": p.export(Format::Url)?}),
         ))
     }
 }
@@ -252,7 +288,7 @@ pub(crate) async fn detail(
     Extension(identity): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted FROM proxies WHERE id = $1 AND user_id = $2")
+    sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted, expires_at FROM proxies WHERE id = $1 AND user_id = $2 AND (expires_at IS NULL OR expires_at > statement_timestamp())")
         .bind(id).bind(identity.user_id).fetch_optional(&state.pool).await?.ok_or_else(not_found)?.response(&state)
 }
 
@@ -267,9 +303,22 @@ pub(crate) async fn random(
         .as_deref()
         .map(normalize_country)
         .transpose()?;
-    sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) ORDER BY random() LIMIT 1")
+    let proxy = sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted, expires_at FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) AND (expires_at IS NULL OR expires_at > statement_timestamp()) ORDER BY random() LIMIT 1")
         .bind(identity.user_id).bind(query.protocol.map(Protocol::as_str)).bind(query.search.trim())
-        .bind(query.region.map(Region::as_str)).bind(country).fetch_optional(&state.pool).await?.ok_or_else(not_found)?.response(&state)
+        .bind(query.region.map(Region::as_str)).bind(&country).fetch_optional(&state.pool).await?;
+    match proxy {
+        Some(proxy) => proxy.response(&state),
+        None => {
+            state.notifications.no_proxies(
+                identity.user_id,
+                "random",
+                query.protocol.map(Protocol::as_str),
+                query.region.map(Region::as_str),
+                country.as_deref(),
+            );
+            Err(not_found())
+        }
+    }
 }
 
 pub(crate) async fn export(
@@ -283,9 +332,18 @@ pub(crate) async fn export(
         .as_deref()
         .map(normalize_country)
         .transpose()?;
-    let rows = sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) ORDER BY host, port, id LIMIT 50001")
+    let rows = sqlx::query_as::<_, StoredProxy>("SELECT id, protocol, host, port, username, region, country, password_encrypted, expires_at FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) AND (expires_at IS NULL OR expires_at > statement_timestamp()) ORDER BY host, port, id LIMIT 50001")
         .bind(identity.user_id).bind(query.protocol.map(Protocol::as_str)).bind(query.search.trim())
-        .bind(query.region.map(Region::as_str)).bind(country).fetch_all(&state.pool).await?;
+        .bind(query.region.map(Region::as_str)).bind(&country).fetch_all(&state.pool).await?;
+    if rows.is_empty() {
+        state.notifications.no_proxies(
+            identity.user_id,
+            "export",
+            query.protocol.map(Protocol::as_str),
+            query.region.map(Region::as_str),
+            country.as_deref(),
+        );
+    }
     if rows.len() > 50_000 {
         return Err(ApiError::bad_request(
             "export_too_large",
@@ -311,6 +369,25 @@ pub(crate) async fn export(
         text,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpiryInput {
+    expires_at: Value,
+}
+
+pub(crate) async fn update_expiry(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ExpiryInput>,
+) -> Result<Json<Value>, ApiError> {
+    identity.require_session()?;
+    let expires_at = parse_expiry(&input.expires_at)?;
+    let proxy = sqlx::query_as::<_, ProxySummary>("UPDATE proxies SET expires_at = $1 WHERE id = $2 AND user_id = $3 RETURNING id, protocol, host, port, username, region, country, created_at::text, expires_at, COALESCE(expires_at <= statement_timestamp(), false) AS expired")
+        .bind(expires_at).bind(id).bind(identity.user_id).fetch_optional(&state.pool).await?.ok_or_else(not_found)?;
+    Ok(Json(json!(proxy)))
 }
 
 #[derive(Deserialize)]
