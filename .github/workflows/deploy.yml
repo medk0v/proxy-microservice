@@ -1,0 +1,149 @@
+name: Check and deploy
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.98.0
+
+jobs:
+  check:
+    name: Test and build ARM64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: proxy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d proxy_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/proxy_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_VERSION"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+      - name: Check formatting and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          node --check web/app.js
+          for script in deploy/*.sh; do bash -n "$script"; done
+          python3 -m unittest discover -s deploy -p 'test_*.py'
+      - name: Unit and PostgreSQL integration tests
+        run: |
+          cargo test --locked
+          python3 scripts/test_integration.py
+      - name: Build release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          cargo build --release --locked
+          mkdir dist
+          cp target/release/proxy-microservice deploy/activate.sh dist/
+          cd dist
+          sha256sum proxy-microservice > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        with:
+          name: proxy-microservice-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy production
+    needs: check
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/master' &&
+      vars.DEPLOY_ENABLED != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://prx.azimuthglobal.co
+    concurrency:
+      group: proxy-microservice-production
+      cancel-in-progress: false
+    steps:
+      - name: Require the current master commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq .object.sha)
+          if [ "$current_sha" != "$GITHUB_SHA" ]; then
+            echo 'This commit is no longer the head of master; refusing an outdated deployment.' >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.check.outputs.artifact_id }}
+          merge-multiple: true
+          path: dist
+      - name: Upload and activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "${!name}" ]; then
+              echo "Missing repository secret: $name" >&2
+              exit 1
+            fi
+          done
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          umask 077
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          ssh-keygen -y -P '' -f "$ssh_dir/key" > /dev/null
+          ssh_options=(
+            -i "$ssh_dir/key"
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null
+            -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+          )
+          release="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          destination="$DEPLOY_USER@$DEPLOY_HOST"
+          incoming="/opt/proxy-microservice/incoming/$release"
+          ssh "${ssh_options[@]}" "$destination" \
+            "test -d /opt/proxy-microservice/releases || { echo 'Run deploy/bootstrap.sh on the server first.' >&2; exit 1; }; mkdir -m 700 '$incoming'"
+          scp "${ssh_options[@]}" dist/proxy-microservice dist/SHA256SUMS dist/activate.sh "$destination:$incoming/"
+          ssh "${ssh_options[@]}" "$destination" "bash '$incoming/activate.sh' '$release'"
+      - name: Check public HTTPS endpoint
+        run: |
+          response=$(curl --fail --silent --show-error --max-time 15 \
+            --retry 5 --retry-delay 3 --retry-all-errors https://prx.azimuthglobal.co/health)
+          test "$response" = ok

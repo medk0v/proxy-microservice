@@ -161,6 +161,10 @@ docker compose --profile full run --rm app reset-admin-password
 
 Команда отзывает все сессии и API-ключи этого администратора.
 
+## Production и автодеплой
+
+GitHub Actions проверяет проект, собирает ARM64-бинарник и доставляет его на `prx.azimuthglobal.co` после push в `master`. Подготовка сервера и четыре GitHub secrets описаны в [deploy/README.md](deploy/README.md). Автодеплой включён по умолчанию; repository variable `DEPLOY_ENABLED=false` приостанавливает деплой, сохраняя проверки и сборку.
+
 ## Проверки
 
 ```bash

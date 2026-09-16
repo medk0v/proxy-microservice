@@ -1,0 +1,32 @@
+[Unit]
+Description=Proxy inventory API and admin panel
+After=network.target postgresql.service
+Wants=postgresql.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=proxy-microservice
+Group=proxy-microservice
+WorkingDirectory=/opt/proxy-microservice
+EnvironmentFile=/etc/proxy-microservice.env
+ExecStart=/opt/proxy-microservice/current/proxy-microservice
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
