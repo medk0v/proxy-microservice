@@ -237,13 +237,9 @@ pub(crate) async fn list(
     let items = sqlx::query_as::<_, ProxySummary>("SELECT id, protocol, host, port, username, region, country, created_at::text, expires_at, COALESCE(expires_at <= statement_timestamp(), false) AS expired FROM proxies WHERE user_id = $1 AND ($2::text IS NULL OR protocol = $2) AND strpos(lower(host || ' ' || username), lower($3)) > 0 AND ($4::text IS NULL OR region = $4) AND ($5::text IS NULL OR country = $5) AND (NOT $6::boolean OR expires_at IS NULL OR expires_at > statement_timestamp()) ORDER BY created_at DESC, id DESC LIMIT $7 OFFSET $8")
         .bind(identity.user_id).bind(protocol).bind(query.search.trim()).bind(region).bind(&country).bind(identity.api_key).bind(per_page).bind((page - 1) * per_page).fetch_all(&state.pool).await?;
     if identity.api_key && total == 0 {
-        state.notifications.no_proxies(
-            identity.user_id,
-            "list",
-            protocol,
-            region,
-            country.as_deref(),
-        );
+        state
+            .notifications
+            .no_proxies("list", protocol, region, country.as_deref());
     }
     Ok(Json(
         json!({"items": items, "total": total, "page": page, "per_page": per_page}),
@@ -310,7 +306,6 @@ pub(crate) async fn random(
         Some(proxy) => proxy.response(&state),
         None => {
             state.notifications.no_proxies(
-                identity.user_id,
                 "random",
                 query.protocol.map(Protocol::as_str),
                 query.region.map(Region::as_str),
@@ -337,7 +332,6 @@ pub(crate) async fn export(
         .bind(query.region.map(Region::as_str)).bind(&country).fetch_all(&state.pool).await?;
     if rows.is_empty() {
         state.notifications.no_proxies(
-            identity.user_id,
             "export",
             query.protocol.map(Protocol::as_str),
             query.region.map(Region::as_str),

@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
@@ -11,12 +10,10 @@ use tokio::{
     process::Command,
     sync::Semaphore,
 };
-use uuid::Uuid;
 
 use crate::config::TelegramConfig;
 
-const COOLDOWN: Duration = Duration::from_secs(60);
-const MAX_COOLDOWNS: usize = 4096;
+const COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone)]
@@ -33,11 +30,10 @@ impl TelegramNotifier {
         }))
     }
 
-    /// Best-effort delivery without delaying a proxy response. Each user can trigger
-    /// one attempt per minute across all operations; at most two attempts run at once.
+    /// Best-effort delivery without delaying a proxy response. All users share
+    /// one attempt per hour across all operations; at most two attempts run at once.
     pub(crate) fn no_proxies(
         &self,
-        user_id: Uuid,
         operation: &'static str,
         protocol: Option<&str>,
         region: Option<&str>,
@@ -50,7 +46,7 @@ impl TelegramNotifier {
         let Ok(mut cooldowns) = inner.cooldowns.lock() else {
             return;
         };
-        if !cooldowns.reserve(user_id, Instant::now()) {
+        if !cooldowns.reserve(Instant::now()) {
             return;
         }
         drop(cooldowns);
@@ -92,16 +88,17 @@ struct NotifierInner {
 }
 
 #[derive(Default)]
-struct Cooldowns(HashMap<Uuid, Instant>);
+struct Cooldowns(Option<Instant>);
 
 impl Cooldowns {
-    fn reserve(&mut self, user_id: Uuid, now: Instant) -> bool {
-        self.0
-            .retain(|_, sent| now.duration_since(*sent) < COOLDOWN);
-        if self.0.contains_key(&user_id) || self.0.len() >= MAX_COOLDOWNS {
+    fn reserve(&mut self, now: Instant) -> bool {
+        if self
+            .0
+            .is_some_and(|sent| now.duration_since(sent) < COOLDOWN)
+        {
             return false;
         }
-        self.0.insert(user_id, now);
+        self.0 = Some(now);
         true
     }
 }
@@ -187,17 +184,18 @@ async fn send_with_curl(program: &Path, config: &TelegramConfig, text: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
-    fn cooldown_is_per_user_and_expires() {
+    fn cooldown_is_global_and_expires_after_one_hour() {
         let mut cooldowns = Cooldowns::default();
         let now = Instant::now();
-        let user = Uuid::new_v4();
-        assert!(cooldowns.reserve(user, now));
-        assert!(!cooldowns.reserve(user, now + Duration::from_secs(59)));
-        assert!(cooldowns.reserve(Uuid::new_v4(), now + Duration::from_secs(59)));
-        assert!(cooldowns.reserve(user, now + COOLDOWN));
-        assert_eq!(cooldowns.0.len(), 2);
+        assert!(cooldowns.reserve(now));
+        assert!(!cooldowns.reserve(now));
+        assert!(!cooldowns.reserve(now + Duration::from_secs(60)));
+        assert!(!cooldowns.reserve(now + Duration::from_secs(3599)));
+        assert!(cooldowns.reserve(now + Duration::from_secs(3600)));
+        assert!(!cooldowns.reserve(now + Duration::from_secs(3601)));
     }
 
     #[cfg(unix)]
