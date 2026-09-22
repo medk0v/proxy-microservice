@@ -10,8 +10,8 @@ database_password = secrets.token_urlsafe(24)
 admin_password = secrets.token_urlsafe(18)
 key = base64.b64encode(secrets.token_bytes(32)).decode()
 content = f"""POSTGRES_PASSWORD={database_password}
-POSTGRES_PORT=55473
-DATABASE_URL=postgresql://proxy_service:{database_password}@127.0.0.1:55473/proxy_service
+POSTGRES_PORT=5432
+DATABASE_URL=postgresql://proxy_service:{database_password}@127.0.0.1:5432/proxy_service
 BIND_ADDR=127.0.0.1:8080
 APP_PORT=8080
 APP_ORIGIN=http://localhost:8080
