@@ -34,7 +34,14 @@
         <label><span class="sr-only">Страна</span><select id="country-filter"><option value="">Все страны</option></select></label>
         <button id="export-button" type="button">Скачать / копировать</button>
       </div>
-      <div class="list-meta"><span id="list-count" role="status"></span><button id="delete-button" class="danger quiet" type="button" hidden>Удалить выбранные</button></div>
+      <div class="list-meta">
+        <span id="list-count" role="status"></span>
+        <div class="selection-actions">
+          <button id="select-all-matching" type="button" disabled>Выделить все</button>
+          <button id="clear-selection" class="quiet" type="button" hidden>Снять выделение</button>
+          <button id="delete-button" class="danger quiet" type="button" hidden>Удалить выбранные</button>
+        </div>
+      </div>
       <div id="list-error" class="error notice" role="alert" hidden></div>
       <div class="table-scroll">
         <table id="proxy-table">

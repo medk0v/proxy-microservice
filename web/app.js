@@ -30,6 +30,7 @@ const messages = {
   csrf_required: "Обновите страницу и повторите действие.",
 };
 let page = 1, items = [], total = 0, selected = new Set(), listVersion = 0, previewVersion = 0;
+let listLoading = false, selectingAll = false;
 let previewData = null, countriesLoaded = false, toastTimer;
 
 function countryName(code) { return code === "unknown" ? "Unknown" : `${countryNames.of(code)} (${code})`; }
@@ -114,20 +115,34 @@ async function showApp(user) {
   page = 1; await loadList();
 }
 function updateSelection() {
+  const busy = listLoading || selectingAll;
+  const pageSelected = items.filter((item) => selected.has(item.id)).length;
   $("delete-button").hidden = selected.size === 0;
+  $("delete-button").disabled = busy;
   $("delete-button").textContent = `Удалить выбранные (${selected.size})`;
-  $("select-all").checked = items.length > 0 && selected.size === items.length;
-  $("select-all").indeterminate = selected.size > 0 && selected.size < items.length;
+  $("select-all-matching").disabled = busy || total === 0 || selected.size === total;
+  $("select-all-matching").textContent = selectingAll ? "Выделение…" : `Выделить все (${total.toLocaleString("ru-RU")})`;
+  $("clear-selection").hidden = selected.size === 0;
+  $("clear-selection").disabled = busy;
+  $("select-all").disabled = busy || items.length === 0;
+  $("select-all").checked = items.length > 0 && pageSelected === items.length;
+  $("select-all").indeterminate = pageSelected > 0 && pageSelected < items.length;
+  $("proxy-rows").querySelectorAll('input[type="checkbox"]').forEach((checkbox, index) => {
+    checkbox.checked = selected.has(items[index].id); checkbox.disabled = busy;
+  });
 }
-async function loadList() {
+async function loadList(preserveSelection = false) {
   const version = ++listVersion;
   const params = filters(); params.set("page", page); params.set("per_page", "50");
+  listLoading = true;
+  if (!preserveSelection) selected.clear();
+  updateSelection();
   setError("list-error", null); $("list-count").textContent = "Загрузка…";
   try {
     const data = await api(`/api/proxies?${params}`);
     if (version !== listVersion) return;
-    if (data.items.length === 0 && data.total > 0 && page > 1) { page = Math.ceil(data.total / 50); return loadList(); }
-    items = data.items; total = data.total; selected.clear();
+    if (data.items.length === 0 && data.total > 0 && page > 1) { page = Math.ceil(data.total / 50); return loadList(preserveSelection); }
+    items = data.items; total = data.total;
     const rows = items.map((item) => {
       const row = document.createElement("tr");
       const checkCell = cell("", "selection"); const checkbox = document.createElement("input");
@@ -164,8 +179,8 @@ async function loadList() {
     $("page-info").textContent = total ? `${(page - 1) * 50 + 1}–${Math.min(page * 50, total)} из ${total.toLocaleString("ru-RU")}` : "0 записей";
     $("prev-page").disabled = page <= 1; $("next-page").disabled = page * 50 >= total;
     $("export-button").disabled = total === 0;
-    updateSelection();
   } catch (error) { if (version === listVersion) { setError("list-error", error); $("list-count").textContent = "Список не загружен"; } }
+  finally { if (version === listVersion) { listLoading = false; updateSelection(); } }
 }
 
 $("login-form").addEventListener("submit", (event) => {
@@ -177,13 +192,32 @@ $("login-form").addEventListener("submit", (event) => {
 });
 $("logout-button").addEventListener("click", () => action($("logout-button"), "list-error", async () => { await api("/api/auth/logout", { method: "POST" }); showLogin(); }));
 let searchTimer;
-$("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { page = 1; loadList(); }, 250); });
+$("search").addEventListener("input", () => {
+  ++listVersion; listLoading = true; selected.clear(); updateSelection();
+  clearTimeout(searchTimer); searchTimer = setTimeout(() => { page = 1; loadList(); }, 250);
+});
 for (const id of ["protocol-filter", "region-filter", "country-filter"]) $(id).addEventListener("change", () => { page = 1; loadList(); });
-$("prev-page").addEventListener("click", () => { if (page > 1) { page--; loadList(); } });
-$("next-page").addEventListener("click", () => { if (page * 50 < total) { page++; loadList(); } });
+$("prev-page").addEventListener("click", () => { if (page > 1) { page--; loadList(true); } });
+$("next-page").addEventListener("click", () => { if (page * 50 < total) { page++; loadList(true); } });
 $("select-all").addEventListener("change", (event) => {
-  selected = new Set(event.target.checked ? items.map((item) => item.id) : []);
-  $("proxy-rows").querySelectorAll('input[type="checkbox"]').forEach((checkbox) => { checkbox.checked = event.target.checked; }); updateSelection();
+  for (const item of items) event.target.checked ? selected.add(item.id) : selected.delete(item.id);
+  updateSelection();
+});
+$("clear-selection").addEventListener("click", () => { selected.clear(); updateSelection(); });
+$("select-all-matching").addEventListener("click", async () => {
+  const version = listVersion, params = filters(), allIds = new Set();
+  params.set("per_page", "200"); selectingAll = true; updateSelection(); setError("list-error", null);
+  try {
+    for (let selectionPage = 1; ; selectionPage++) {
+      params.set("page", selectionPage);
+      const data = await api(`/api/proxies?${params}`);
+      if (version !== listVersion) return;
+      for (const item of data.items) allIds.add(item.id);
+      if (data.items.length === 0 || selectionPage * 200 >= data.total) break;
+    }
+    selected = allIds;
+  } catch (error) { if (version === listVersion) setError("list-error", error); }
+  finally { selectingAll = false; updateSelection(); }
 });
 
 function invalidatePreview() {
@@ -257,8 +291,20 @@ $("delete-button").addEventListener("click", () => {
   setError("delete-error", null); $("delete-dialog").showModal();
 });
 $("confirm-delete").addEventListener("click", () => action($("confirm-delete"), "delete-error", async () => {
-  const data = await api("/api/proxies/delete", { method: "POST", data: { ids: [...selected] } });
-  $("delete-dialog").close(); await loadList(); notify(`Удалено: ${data.deleted}`);
+  const ids = [...selected]; let deleted = 0;
+  try {
+    for (let offset = 0; offset < ids.length; offset += 1000) {
+      const batch = ids.slice(offset, offset + 1000);
+      const data = await api("/api/proxies/delete", { method: "POST", data: { ids: batch } });
+      deleted += data.deleted;
+      for (const id of batch) selected.delete(id);
+    }
+  } catch (error) {
+    await loadList(true);
+    $("delete-description").textContent = `Удалено: ${deleted}. Осталось выбранных: ${selected.size}.`;
+    throw error;
+  }
+  $("delete-dialog").close(); await loadList(); notify(`Удалено: ${deleted}`);
 }));
 
 async function loadKeys() {
